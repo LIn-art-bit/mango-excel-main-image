@@ -3,14 +3,13 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import textwrap
+from datetime import datetime, timezone
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
-
-
-MANIFEST = Path(r"D:\Mango-ae-0428685372_main_image_batch\manifest.json")
 
 
 def font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
@@ -90,18 +89,53 @@ def compose(original_path: Path, output_path: Path, title: str) -> None:
     canvas.save(output_path, "PNG", optimize=True)
 
 
+def update_ledger(status_path: Path, local_id: str, status: str, error: str | None = None) -> None:
+    if not status_path.exists():
+        return
+    ledger = json.loads(status_path.read_text(encoding="utf-8"))
+    records = ledger.get("records", {})
+    if local_id in records:
+        records[local_id]["status"] = status
+        records[local_id]["error"] = error
+        records[local_id]["updated_at"] = datetime.now(timezone.utc).isoformat()
+        ledger["updated_at"] = datetime.now(timezone.utc).isoformat()
+        status_path.write_text(json.dumps(ledger, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Compose deterministic 800x800 main images for a Mango batch.")
+    parser.add_argument("--manifest", required=True, type=Path)
+    parser.add_argument("--status-ledger", type=Path, default=None)
+    parser.add_argument("--limit", type=int, default=0, help="Maximum missing images to create; 0 means all")
+    return parser.parse_args()
+
+
 def main() -> None:
-    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    args = parse_args()
+    manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
     made = 0
     skipped = 0
+    failed = 0
     for item in manifest["items"]:
         out = Path(item["generated_image_path"])
         if out.exists():
             skipped += 1
+            if args.status_ledger:
+                update_ledger(args.status_ledger, item["local_id"], "verified")
             continue
-        compose(Path(item["original_image_path"]), out, item["title"])
+        if args.limit and made >= args.limit:
+            break
+        try:
+            compose(Path(item["original_image_path"]), out, item["title"])
+            if args.status_ledger:
+                update_ledger(args.status_ledger, item["local_id"], "verified")
+        except Exception as exc:  # noqa: BLE001 - keep batch moving and record the row.
+            failed += 1
+            if args.status_ledger:
+                update_ledger(args.status_ledger, item["local_id"], "failed", str(exc))
+            continue
         made += 1
-    print(json.dumps({"created": made, "skipped_existing": skipped}, ensure_ascii=False))
+    print(json.dumps({"created": made, "skipped_existing": skipped, "failed": failed}, ensure_ascii=False))
 
 
 if __name__ == "__main__":

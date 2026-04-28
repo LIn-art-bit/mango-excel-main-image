@@ -14,6 +14,7 @@ import re
 import sys
 import urllib.request
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
@@ -26,6 +27,7 @@ from PIL import Image
 REQUIRED_HEADERS = ("本地ID", "产品标题", "产品图片1")
 HEADER_ROW = 2
 FINAL_IMAGE_SIZE = (800, 800)
+DEFAULT_OUTPUT_ROOT = Path(r"D:\MangoMainImageBatches")
 
 
 @dataclass
@@ -54,13 +56,14 @@ def workbook_paths(
     output_path: Path | None = None,
     output_root: Path | None = None,
 ) -> dict[str, Path]:
-    root = output_root if output_root is not None else input_path.parent
+    root = output_root if output_root is not None else DEFAULT_OUTPUT_ROOT
     base_dir = root / f"{input_path.stem}_main_image_batch"
     originals_dir = base_dir / "original_images"
     generated_dir = base_dir / "generated_images"
     staging_dir = base_dir / "staging"
     review_queue_dir = base_dir / "review_queue"
     manifest_path = base_dir / "manifest.json"
+    status_path = base_dir / "status_ledger.json"
     log_path = base_dir / "process_log.json"
     if output_path is None:
         output_path = base_dir / f"{input_path.stem}_main_image_output.xlsx"
@@ -71,6 +74,7 @@ def workbook_paths(
         "staging_dir": staging_dir,
         "review_queue_dir": review_queue_dir,
         "manifest_path": manifest_path,
+        "status_path": status_path,
         "log_path": log_path,
         "output_xlsx": output_path,
     }
@@ -153,6 +157,68 @@ def write_json(path: Path, payload: object) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def read_json(path: Path, default: object) -> object:
+    if not path.exists():
+        return default
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return default
+
+
+def summarize_ledger(ledger: dict) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    records = ledger.get("records", {}) if isinstance(ledger, dict) else {}
+    for record in records.values():
+        status = record.get("status", "pending")
+        counts[status] = counts.get(status, 0) + 1
+    counts["total"] = len(records)
+    counts["unfinished"] = sum(
+        count for status, count in counts.items() if status not in ("verified", "total", "unfinished")
+    )
+    return counts
+
+
+def sync_status_ledger(paths: dict[str, Path], items: list[Item], skips: list[dict]) -> dict:
+    existing = read_json(paths["status_path"], {})
+    previous_records = {}
+    if isinstance(existing, dict) and isinstance(existing.get("records"), dict):
+        previous_records = existing["records"]
+
+    records = {}
+    for item in items:
+        previous = previous_records.get(item.local_id, {})
+        current_status = previous.get("status", "pending") if isinstance(previous, dict) else "pending"
+        generated_path = Path(item.generated_image_path)
+        if current_status == "verified" and not generated_path.exists():
+            current_status = "pending"
+
+        records[item.local_id] = {
+            "row_number": item.row_number,
+            "local_id": item.local_id,
+            "title": item.title,
+            "source_image_url": item.source_image_url,
+            "original_image_path": item.original_image_path,
+            "generated_image_path": item.generated_image_path,
+            "status": current_status,
+            "error": previous.get("error") if isinstance(previous, dict) else None,
+            "updated_at": (previous.get("updated_at") if isinstance(previous, dict) else None) or utc_now(),
+        }
+
+    ledger = {
+        "batch_dir": str(paths["base_dir"].resolve()),
+        "updated_at": utc_now(),
+        "records": records,
+        "skips": skips,
+    }
+    write_json(paths["status_path"], ledger)
+    return ledger
+
+
 def prepare(input_path: Path, limit: int | None, output_path: Path | None, output_root: Path | None) -> dict:
     paths = workbook_paths(input_path, output_path, output_root)
     for key in ("base_dir", "originals_dir", "generated_dir", "staging_dir", "review_queue_dir"):
@@ -163,6 +229,7 @@ def prepare(input_path: Path, limit: int | None, output_path: Path | None, outpu
     for item in items:
         ok, error = download_image(item.source_image_url, Path(item.original_image_path))
         downloads.append({"local_id": item.local_id, "ok": ok, "error": error})
+    ledger = sync_status_ledger(paths, items, skips)
 
     payload = {
         "input_xlsx": str(input_path.resolve()),
@@ -175,6 +242,8 @@ def prepare(input_path: Path, limit: int | None, output_path: Path | None, outpu
         "staging_dir": str(paths["staging_dir"].resolve()),
         "review_queue_dir": str(paths["review_queue_dir"].resolve()),
         "output_xlsx": str(paths["output_xlsx"].resolve()),
+        "status_ledger": str(paths["status_path"].resolve()),
+        "status_counts": summarize_ledger(ledger),
     }
     write_json(paths["manifest_path"], payload)
     write_json(paths["log_path"], {"skips": skips, "downloads": downloads})
@@ -199,6 +268,83 @@ def normalize_generated_image(path: Path) -> tuple[bool, str | None]:
         return True, None
     except Exception as exc:  # noqa: BLE001 - log exact failure for batch review.
         return False, str(exc)
+
+
+def load_or_prepare(input_path: Path, limit: int | None, output_path: Path | None, output_root: Path | None) -> tuple[dict, dict[str, Path]]:
+    paths = workbook_paths(input_path, output_path, output_root)
+    if not paths["status_path"].exists() or not paths["manifest_path"].exists():
+        prepare(input_path, limit, output_path, output_root)
+    ledger = read_json(paths["status_path"], {})
+    if not isinstance(ledger, dict) or "records" not in ledger:
+        prepare(input_path, limit, output_path, output_root)
+        ledger = read_json(paths["status_path"], {})
+    return ledger if isinstance(ledger, dict) else {}, paths
+
+
+def status(input_path: Path, limit: int | None, output_path: Path | None, output_root: Path | None) -> dict:
+    ledger, paths = load_or_prepare(input_path, limit, output_path, output_root)
+    records = ledger.get("records", {})
+    unfinished = [
+        record for record in records.values()
+        if record.get("status") != "verified"
+    ]
+    return {
+        "status_ledger": str(paths["status_path"].resolve()),
+        "manifest_path": str(paths["manifest_path"].resolve()),
+        "output_xlsx": str(paths["output_xlsx"].resolve()),
+        "counts": summarize_ledger(ledger),
+        "next_unfinished": unfinished[:10],
+    }
+
+
+def next_items(
+    input_path: Path,
+    limit: int | None,
+    output_path: Path | None,
+    output_root: Path | None,
+    count: int,
+) -> dict:
+    ledger, paths = load_or_prepare(input_path, limit, output_path, output_root)
+    records = ledger.get("records", {})
+    unfinished = [
+        record for record in records.values()
+        if record.get("status") != "verified"
+    ]
+    return {
+        "status_ledger": str(paths["status_path"].resolve()),
+        "count": min(count, len(unfinished)),
+        "items": unfinished[:count],
+    }
+
+
+def mark_item(
+    input_path: Path,
+    limit: int | None,
+    output_path: Path | None,
+    output_root: Path | None,
+    local_id: str,
+    item_status: str,
+    error: str | None,
+) -> dict:
+    ledger, paths = load_or_prepare(input_path, limit, output_path, output_root)
+    records = ledger.get("records", {})
+    if local_id not in records:
+        raise SystemExit(f"Unknown local_id in status ledger: {local_id}")
+    if item_status == "verified":
+        ok, normalize_error = normalize_generated_image(Path(records[local_id]["generated_image_path"]))
+        if not ok:
+            raise SystemExit(f"Cannot mark verified; generated image is not valid: {normalize_error}")
+    records[local_id]["status"] = item_status
+    records[local_id]["error"] = error
+    records[local_id]["updated_at"] = utc_now()
+    ledger["updated_at"] = utc_now()
+    write_json(paths["status_path"], ledger)
+    return {
+        "status_ledger": str(paths["status_path"].resolve()),
+        "local_id": local_id,
+        "status": item_status,
+        "counts": summarize_ledger(ledger),
+    }
 
 
 def build(input_path: Path, limit: int | None, output_path: Path | None, output_root: Path | None) -> dict:
@@ -264,12 +410,18 @@ def build(input_path: Path, limit: int | None, output_path: Path | None, output_
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Prepare/build Mango Excel main-image batches.")
     subparsers = parser.add_subparsers(dest="command", required=True)
-    for command in ("prepare", "build"):
+    for command in ("prepare", "build", "status", "next", "mark"):
         sub = subparsers.add_parser(command)
         sub.add_argument("--input", required=True, type=Path, help="Input .xlsx file")
         sub.add_argument("--limit", type=int, default=3, help="Number of valid products to process; use 0 for all")
         sub.add_argument("--output", type=Path, default=None, help="Output .xlsx path")
         sub.add_argument("--output-root", type=Path, default=None, help="Root folder for batch outputs")
+        if command == "next":
+            sub.add_argument("--count", type=int, default=20, help="Number of unfinished products to return")
+        if command == "mark":
+            sub.add_argument("--local-id", required=True, help="Product local ID to update")
+            sub.add_argument("--status", required=True, choices=("pending", "verified", "failed"), help="New status")
+            sub.add_argument("--error", default=None, help="Failure/error note")
     return parser.parse_args()
 
 
@@ -286,8 +438,14 @@ def main() -> int:
 
     if args.command == "prepare":
         result = prepare(input_path, limit, args.output, output_root)
-    else:
+    elif args.command == "build":
         result = build(input_path, limit, args.output, output_root)
+    elif args.command == "status":
+        result = status(input_path, limit, args.output, output_root)
+    elif args.command == "next":
+        result = next_items(input_path, limit, args.output, output_root, args.count)
+    else:
+        result = mark_item(input_path, limit, args.output, output_root, args.local_id, args.status, args.error)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 
