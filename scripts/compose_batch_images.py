@@ -89,7 +89,7 @@ def compose(original_path: Path, output_path: Path, title: str) -> None:
     canvas.save(output_path, "PNG", optimize=True)
 
 
-def update_ledger(status_path: Path, local_id: str, status: str, error: str | None = None) -> None:
+def update_ledger(status_path: Path, local_id: str, status: str, error: str | None = None, template_path: Path | None = None) -> None:
     if not status_path.exists():
         return
     ledger = json.loads(status_path.read_text(encoding="utf-8"))
@@ -97,6 +97,11 @@ def update_ledger(status_path: Path, local_id: str, status: str, error: str | No
     if local_id in records:
         records[local_id]["status"] = status
         records[local_id]["error"] = error
+        if template_path is not None:
+            records[local_id]["generated_fast_image_path"] = str(template_path.resolve())
+        records[local_id]["owner"] = None
+        records[local_id]["claimed_at"] = None
+        records[local_id]["lease_expires_at"] = None
         records[local_id]["updated_at"] = datetime.now(timezone.utc).isoformat()
         ledger["updated_at"] = datetime.now(timezone.utc).isoformat()
         status_path.write_text(json.dumps(ledger, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -113,22 +118,26 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
+    generated_fast_dir = Path(
+        manifest.get("generated_fast_dir")
+        or args.manifest.parent / "generated_fast"
+    )
     made = 0
     skipped = 0
     failed = 0
     for item in manifest["items"]:
-        out = Path(item["generated_image_path"])
+        out = generated_fast_dir / f"{item['local_id']}.png"
         if out.exists():
             skipped += 1
             if args.status_ledger:
-                update_ledger(args.status_ledger, item["local_id"], "verified")
+                update_ledger(args.status_ledger, item["local_id"], "template_generated", template_path=out)
             continue
         if args.limit and made >= args.limit:
             break
         try:
             compose(Path(item["original_image_path"]), out, item["title"])
             if args.status_ledger:
-                update_ledger(args.status_ledger, item["local_id"], "verified")
+                update_ledger(args.status_ledger, item["local_id"], "template_generated", template_path=out)
         except Exception as exc:  # noqa: BLE001 - keep batch moving and record the row.
             failed += 1
             if args.status_ledger:

@@ -1,6 +1,6 @@
 ---
 name: mango-excel-main-image
-description: Use this skill whenever the user wants to process Mango ERP or AliExpress pending-publish Excel .xlsx files, preserve 本地ID and 产品标题, use 产品图片1 as the reference image, batch-generate AI-refined ecommerce main images, name each output image by 本地ID, and return a new Excel workbook with a 主图 column containing local generated-image paths.
+description: Use this skill whenever the user wants to process Mango ERP or AliExpress pending-publish Excel .xlsx files, batch-generate AI-refined ecommerce main images from 产品图片1, preserve 本地ID and 产品标题, handle long-running 100+ row image queues, or return a workbook with a 主图 column.
 ---
 
 # Mango Excel Main Image
@@ -47,6 +47,8 @@ D:\MangoMainImageBatches
 
 If `D:\MangoMainImageBatches` does not exist, create it. If it already exists, reuse it. If the user asks for a different destination drive or folder, pass `--output-root <folder>` and keep all batch outputs there.
 
+For a newly uploaded or newly provided Excel workbook, start a fresh task by default with `prepare --new-task`. This creates a timestamped subfolder and updates the latest-batch pointer, so a new upload does not accidentally continue an older interrupted run for a workbook with the same file name. Resume only when the user explicitly asks to continue a previous run, or when the current run is interrupted and the latest-batch pointer belongs to the same active task.
+
 Save verified AI-refined images under:
 
 ```text
@@ -58,6 +60,7 @@ Keep non-final outputs outside `generated_images`, for example:
 ```text
 <batch_folder>/staging/
 <batch_folder>/review_queue/
+<batch_folder>/generated_fast/
 ```
 
 Every generated main image must be named with the current row's `本地ID`:
@@ -75,26 +78,26 @@ Never use row numbers as generated-image names. Never overwrite an existing `<�
 - `generated_images/<本地ID>.png` is reserved for verified AI-refined images only.
 - If a fast template/composition fallback is explicitly requested, save those files in a clearly separate folder such as `<batch_folder>/generated_fast/` or `<batch_folder>/template_images/`, and do not mark them as `verified` AI-refined outputs.
 - Do not use `scripts/compose_batch_images.py` for the final `主图` workflow unless the user explicitly chooses speed over AI refinement for that run.
+- `scripts/compose_batch_images.py` may only create `generated_fast/<本地ID>.png` and mark rows `template_generated`; those rows are still unfinished for the final AI-refined workflow.
 - Each valid product row requires its own image generation call using the original downloaded product image as reference and the fixed prompt template with that row's title.
 - A row may be marked `verified` only after the generated file is an AI-refined result, exists on disk, opens successfully, and is normalized to 800x800 PNG.
 
 ## Default Workflow
 
-1. Use `scripts/process_mango_excel.py prepare` to inspect the workbook, extract valid rows, download original images, write a manifest, and create/update the durable status ledger.
-2. Use `scripts/process_mango_excel.py status` to inspect the durable status ledger before generating images.
-3. Use `scripts/process_mango_excel.py next --count <N>` to get the next unfinished AI-refinement batch.
-4. For each returned item, open the downloaded original image with `view_image` so it is visible as the edit/reference image.
-5. Use the fixed prompt template in `references/prompt_template.md`; replace `{title}` with the row's `产品标题`.
-6. Generate one image per product using the image generation tool.
-7. Save intermediate outputs to `<batch_folder>/staging/` or `<batch_folder>/review_queue/`.
-8. Only after the generated image is accepted as an AI-refined final, move or copy it into `<batch_folder>/generated_images/<本地ID>.png`.
-9. Immediately run `scripts/process_mango_excel.py mark --local-id <本地ID> --status verified` after each completed row.
-10. If generation fails, save the error with `scripts/process_mango_excel.py mark --local-id <本地ID> --status failed --error "<reason>"` and continue to the next item when possible.
-11. Use `scripts/process_mango_excel.py build` to create the output workbook with the `主图` paths after all rows are verified, or after a batch if the user wants an interim workbook.
-12. Verify the workbook:
-   - output rows match the processed valid item count
-   - every `主图` path exists
-   - generated image filenames exactly match `本地ID`
+1. Use the Codex bundled Python executable from `load_workspace_dependencies`; do not rely on bare `python` in this Windows desktop environment.
+2. Do not pause for style confirmation by default. For a newly uploaded Excel, prepare the durable full queue immediately with `prepare --limit 0 --run-mode full --new-task`. The manifest and ledger record `run_mode`, `requested_limit`, input fingerprint, valid row count, and `batch_id` so a new task cannot be mistaken for an older run.
+3. Use the returned `batch_id` and latest-batch pointer for the rest of the current run. If the user explicitly asks to resume an older batch, pass that older `--batch-id`.
+4. Use `status --limit 0 --run-mode full` before generating images.
+5. Use 2 workers by default for long full runs. Each worker reserves work with `claim --limit 0 --run-mode full --count 10 --owner <worker-id> --lease-minutes 15`.
+6. For each claimed item, open the downloaded original image with `view_image` so it is visible as the edit/reference image.
+7. Use the fixed prompt template in `references/prompt_template.md`; replace `{title}` with the row's `产品标题`.
+8. Generate one image per product using the image generation tool.
+9. Save intermediate outputs to `<batch_folder>/staging/` or `<batch_folder>/review_queue/`.
+10. Only after the generated image is accepted as an AI-refined final, move or copy it into `<batch_folder>/generated_images/<本地ID>.png`.
+11. Immediately run `mark --limit 0 --run-mode full --local-id <本地ID> --status verified --owner <worker-id>` after each completed row.
+12. If generation fails, save the error with `mark --limit 0 --run-mode full --local-id <本地ID> --status failed --error "<reason>"` and continue to the next item when possible.
+13. Use `build --allow-partial` only for interim review workbooks. The final `build` command must be strict and must fail if any row is unfinished or missing a verified image.
+14. Run `verify --limit 0 --run-mode full` before final delivery.
 
 ## Hard Completion Rule
 
@@ -105,49 +108,55 @@ Never use row numbers as generated-image names. Never overwrite an existing `<�
   - the final Excel workbook has been rebuilt
   - the final Excel workbook points only to verified images on disk
 - If any row remains `pending` or `failed`, the task is still in progress and must not be treated as finished.
+- If any row remains `claimed` or `template_generated`, the task is also still in progress; release stale claims or resume AI refinement.
 - Do not stop early just because some images already exist on disk or because a partial Excel file was created.
 - After each image completes, immediately persist the image to disk, update the durable status ledger, and continue to the next unfinished row.
 - If the run is interrupted by a crash, context loss, sandbox issue, network problem, rate limit, or any other external interruption, resume from the next unfinished row instead of restarting completed rows.
-- Use heartbeat automation only as a recovery mechanism when the main run stops unexpectedly before all rows are verified.
-- For long tasks, prefer a 10 to 15 minute heartbeat interval so interrupted runs resume promptly.
-- Before final delivery, run `status --limit 0` and confirm `unfinished` is 0.
-- Always check the fixed output batch folder before starting a new run. If `manifest.json` and `status_ledger.json` already exist for the same input workbook, reuse them and continue from unfinished rows instead of creating a separate duplicate batch folder.
+- Use heartbeat automation as a recovery mechanism during long full runs. Default to a 15-minute heartbeat while unfinished rows remain.
+- On heartbeat resume, run `status --limit 0 --run-mode full`; if unfinished is not 0, continue from the latest batch by claiming the next 10 rows per worker.
+- Before final delivery, run `status --limit 0 --run-mode full` and confirm `unfinished` is 0, then run `verify --limit 0 --run-mode full` and confirm `ok` is true.
+- For a newly uploaded/provided Excel, create a fresh task folder with `--new-task` by default. Reuse an existing `manifest.json` and `status_ledger.json` only when resuming the current latest batch after an interruption, or when the user explicitly asks to continue a previous batch.
 
 ## Long-Run Design For 300+ AI Images
 
 - Treat 100+ or 300+ row jobs as long-running AI production queues, not one-shot chat tasks.
-- Initialize the full manifest and status ledger first with `prepare --limit 0`. By default this writes to `D:\MangoMainImageBatches\<input_stem>_main_image_batch`.
-- Process repeated active batches of 20 to 30 unfinished rows by default. This balances progress, reviewability, rate-limit recovery, and interruption recovery.
+- Initialize the full manifest and status ledger first with `prepare --limit 0 --run-mode full --new-task`. By default this writes to a timestamped subfolder under `D:\MangoMainImageBatches\`.
+- Process repeated claimed batches of 10 unfinished rows per worker by default.
 - After every AI-refined image, save the PNG, mark that row `verified`, and continue. Never wait until the whole batch is done to update the ledger.
 - Rebuild an interim workbook after each completed batch when useful, but do not call the task complete until the final full workbook has been rebuilt and verified.
-- Keep a heartbeat automation active during the run with a 10 to 15 minute interval. Pause or delete it after `unfinished` is 0.
+- Keep a heartbeat automation active during the run with a 15-minute interval. Pause or delete it after `unfinished` is 0.
 - If the user explicitly asks for maximum throughput, explain that true parallel AI generation requires an external image-generation API or queue. Do not pretend that local multi-agent orchestration alone guarantees faster built-in image generation.
-- If the user explicitly asks to use multiple agents, split only by disjoint row ranges or manifest chunks, and require every worker to use the shared status ledger without overwriting rows owned by another worker.
-- If rate limits, image-tool failures, or context loss occur, record failed rows in the ledger and resume later from `failed` plus `pending` rows.
+- If the user asks for a long full run and does not specify worker count, use 2 workers by default. Use 3 workers only if the user explicitly asks for maximum throughput. Every worker must call `claim --owner <worker-id>` before generating images. Workers must not scan the whole ledger and choose rows themselves.
+- If rate limits, image-tool failures, or context loss occur, record failed rows in the ledger and resume later from `failed` plus `pending` rows. Expired `claimed` rows can be reclaimed by a later `claim` call.
 
 ## Batch Defaults
 
-- Default sample limit: `3`.
-- Use a higher `--limit` only when the user asks for a larger batch or full processing.
+- Default production mode for a newly uploaded Excel: full queue, no style-confirmation pause, `--new-task`, 2 workers, 10 rows per worker, 15-minute heartbeat.
+- Sample mode is optional only when the user explicitly asks to preview style first.
+- Use a higher `--limit` only when the user asks for a bounded batch instead of full processing.
 - For full processing, continue until all valid rows are verified; a partial batch does not count as completion.
-- For AI-refinement production runs, use active batches of 20 to 30 rows by default.
+- For AI-refinement production runs, use claimed batches of 10 rows per worker by default.
 
 ## Script Usage
 
-Prepare the sample batch:
+Prepare a fresh full task for a newly uploaded Excel:
 
 ```powershell
 & "<bundled-python>" "C:\Users\admin\.codex\skills\mango-excel-main-image\scripts\process_mango_excel.py" prepare `
   --input "C:\Users\admin\Downloads\Mango-ae-0428685372.xlsx" `
-  --limit 3
+  --limit 0 `
+  --run-mode full `
+  --new-task
 ```
 
-Prepare the full long-run queue:
+Optional: prepare a sample batch only if the user explicitly asks to preview style:
 
 ```powershell
 & "<bundled-python>" "C:\Users\admin\.codex\skills\mango-excel-main-image\scripts\process_mango_excel.py" prepare `
   --input "C:\Users\admin\Downloads\Mango-ae-0428685372.xlsx" `
-  --limit 0
+  --limit 3 `
+  --run-mode sample `
+  --new-task
 ```
 
 Check progress:
@@ -155,16 +164,32 @@ Check progress:
 ```powershell
 & "<bundled-python>" "C:\Users\admin\.codex\skills\mango-excel-main-image\scripts\process_mango_excel.py" status `
   --input "C:\Users\admin\Downloads\Mango-ae-0428685372.xlsx" `
-  --limit 0
+  --limit 0 `
+  --run-mode full
 ```
 
-Get the next AI-refinement batch:
+Claim the next AI-refinement batch:
 
 ```powershell
-& "<bundled-python>" "C:\Users\admin\.codex\skills\mango-excel-main-image\scripts\process_mango_excel.py" next `
+& "<bundled-python>" "C:\Users\admin\.codex\skills\mango-excel-main-image\scripts\process_mango_excel.py" claim `
   --input "C:\Users\admin\Downloads\Mango-ae-0428685372.xlsx" `
   --limit 0 `
-  --count 25
+  --run-mode full `
+  --count 10 `
+  --owner "worker-1" `
+  --lease-minutes 15
+```
+
+For the default 2-worker long run, claim a second batch for worker 2:
+
+```powershell
+& "<bundled-python>" "C:\Users\admin\.codex\skills\mango-excel-main-image\scripts\process_mango_excel.py" claim `
+  --input "C:\Users\admin\Downloads\Mango-ae-0428685372.xlsx" `
+  --limit 0 `
+  --run-mode full `
+  --count 10 `
+  --owner "worker-2" `
+  --lease-minutes 15
 ```
 
 Mark one AI-refined row as verified after its final image exists:
@@ -173,19 +198,51 @@ Mark one AI-refined row as verified after its final image exists:
 & "<bundled-python>" "C:\Users\admin\.codex\skills\mango-excel-main-image\scripts\process_mango_excel.py" mark `
   --input "C:\Users\admin\Downloads\Mango-ae-0428685372.xlsx" `
   --limit 0 `
+  --run-mode full `
   --local-id "<本地ID>" `
-  --status verified
+  --status verified `
+  --owner "worker-1"
 ```
 
-Build the output workbook after generated AI-refined images exist:
+Build an interim workbook during the run:
 
 ```powershell
 & "<bundled-python>" "C:\Users\admin\.codex\skills\mango-excel-main-image\scripts\process_mango_excel.py" build `
   --input "C:\Users\admin\Downloads\Mango-ae-0428685372.xlsx" `
-  --limit 0
+  --limit 0 `
+  --run-mode full `
+  --allow-partial
 ```
 
-The script prints JSON with `manifest_path`, `status_ledger`, `originals_dir`, `generated_dir`, `staging_dir`, `review_queue_dir`, `output_xlsx`, status counts, and skip details.
+Build the final strict output workbook after every row is verified:
+
+```powershell
+& "<bundled-python>" "C:\Users\admin\.codex\skills\mango-excel-main-image\scripts\process_mango_excel.py" build `
+  --input "C:\Users\admin\Downloads\Mango-ae-0428685372.xlsx" `
+  --limit 0 `
+  --run-mode full
+```
+
+Verify final completion:
+
+```powershell
+& "<bundled-python>" "C:\Users\admin\.codex\skills\mango-excel-main-image\scripts\process_mango_excel.py" verify `
+  --input "C:\Users\admin\Downloads\Mango-ae-0428685372.xlsx" `
+  --limit 0 `
+  --run-mode full
+```
+
+Release a worker's stale claims if you need to stop or hand off work:
+
+```powershell
+& "<bundled-python>" "C:\Users\admin\.codex\skills\mango-excel-main-image\scripts\process_mango_excel.py" release `
+  --input "C:\Users\admin\Downloads\Mango-ae-0428685372.xlsx" `
+  --limit 0 `
+  --run-mode full `
+  --owner "worker-1"
+```
+
+The script prints JSON with `manifest_path`, `status_ledger`, `originals_dir`, `generated_dir`, `generated_fast_dir`, `staging_dir`, `review_queue_dir`, `output_xlsx`, status counts, and skip details.
 
 Use a custom output root only when the user explicitly asks:
 
@@ -193,6 +250,8 @@ Use a custom output root only when the user explicitly asks:
 & "<bundled-python>" "C:\Users\admin\.codex\skills\mango-excel-main-image\scripts\process_mango_excel.py" prepare `
   --input "C:\Users\admin\Downloads\Mango-ae-0428685372.xlsx" `
   --limit 0 `
+  --run-mode full `
+  --new-task `
   --output-root "D:\SomeOtherFolder"
 ```
 

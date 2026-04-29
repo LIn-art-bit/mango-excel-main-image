@@ -1,0 +1,25 @@
+{
+  "skill_name": "mango-excel-main-image",
+  "evals": [
+    {
+      "id": "full-200-row-production",
+      "prompt": "我上传了一个 Mango ERP 待发布 Excel，里面大概 200 条 AliExpress 汽配产品。请用 产品图片1 作为参考，为每条产品生成 AI 优化主图，并返回带 主图 列的新 Excel。",
+      "expected_output": "Agent starts a fresh full task with prepare --limit 0 --run-mode full --new-task, uses the default 2 workers with claim --count 10 --lease-minutes 15, marks each row immediately, and does not call the final task complete until strict build and verify pass."
+    },
+    {
+      "id": "sample-ledger-already-exists",
+      "prompt": "这个 Excel 之前已经做过 3 条样图，现在继续把整个表都处理完，不要重复那 3 条，最后给完整 Excel。",
+      "expected_output": "Agent treats a newly uploaded Excel as a new task by default, uses --new-task to create a fresh timestamped batch folder, and resumes an older batch only when the user explicitly asks to continue it."
+    },
+    {
+      "id": "generation-failure-recovery",
+      "prompt": "处理过程中有几条图片生成失败或被限流了，先继续处理其他产品，失败的后面再补，不要从头开始。",
+      "expected_output": "Agent marks failed rows with errors, continues claiming pending rows, later retries failed/pending rows, and never treats failed rows as complete."
+    },
+    {
+      "id": "user-asks-for-early-excel",
+      "prompt": "先把现在已经生成的图片路径放进 Excel 给我吧，剩下的你继续跑。",
+      "expected_output": "Agent may build an interim workbook only with --allow-partial, clearly labels it as interim, and does not claim final completion until verify --run-mode full returns ok true."
+    }
+  ]
+}
