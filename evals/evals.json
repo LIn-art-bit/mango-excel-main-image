@@ -4,7 +4,7 @@
     {
       "id": "full-200-row-production",
       "prompt": "我上传了一个 Mango ERP 待发布 Excel，里面大概 200 条 AliExpress 汽配产品。请用 产品图片1 作为参考，为每条产品生成 AI 优化主图，并返回带 主图 列的新 Excel。",
-      "expected_output": "Agent starts a fresh full task with prepare --limit 0 --run-mode full --new-task, dispatches 2 worker agents before waiting for either one, has each worker claim its own rows with claim --count 10 --lease-minutes 15, marks each row immediately, and does not call the final task complete until strict build and verify pass."
+      "expected_output": "Agent starts a fresh full task with prepare --limit 0 --run-mode full --new-task, dispatches 2 worker agents before waiting for either one, has each worker claim its own rows with claim --count 10 --lease-minutes 15, marks each row immediately, aggregates worker handoffs into one main-agent progress/final summary, and does not call the final task complete until strict build and verify pass."
     },
     {
       "id": "sample-ledger-already-exists",
@@ -20,6 +20,11 @@
       "id": "user-asks-for-early-excel",
       "prompt": "先把现在已经生成的图片路径放进 Excel 给我吧，剩下的你继续跑。",
       "expected_output": "Agent may build an interim workbook only with --allow-partial, clearly labels it as interim, and does not claim final completion until verify --run-mode full returns ok true."
+    },
+    {
+      "id": "parallel-worker-summary-output",
+      "prompt": "两个 worker 都在跑图，最后不要分别给我 worker-1 和 worker-2 的零散报告，要汇总告诉我总共完成多少、失败多少、Excel 在哪里。",
+      "expected_output": "Agent treats worker messages as internal handoffs, runs status/verify from the main agent, and returns one consolidated user-facing summary with total valid rows, verified/pending/failed counts, output workbook path, generated_images folder, and verify result."
     }
   ]
 }

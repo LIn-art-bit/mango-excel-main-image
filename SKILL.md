@@ -39,6 +39,8 @@ Create a new `.xlsx` workbook with exactly these columns:
 
 The `主图` value is the local absolute path to the verified AI-refined image. Add it as a clickable hyperlink when possible.
 
+The user-facing output must be aggregated by the main agent, even when image generation is done by parallel worker agents. Worker agents may report internal handoff details, but the user should receive one consolidated progress or final summary, not separate worker-by-worker final reports.
+
 By default, save batch outputs under this fixed D drive root:
 
 ```text
@@ -130,6 +132,16 @@ Never use row numbers as generated-image names. Never overwrite an existing `<�
 - If the user asks for a long full run and does not specify worker count, use 2 concurrent worker agents by default. Start both workers before waiting, so two images can be in generation at once when the image tool/platform supports parallel tool calls. Use 3 workers only if the user explicitly asks for maximum throughput. Every worker must call `claim --owner <worker-id>` before generating images. Workers must not scan the whole ledger and choose rows themselves.
 - If subagents cannot access the image generation tool or the platform serializes image generation calls, report that limitation clearly and continue with the ledger-based queue rather than pretending the run is truly parallel.
 - If rate limits, image-tool failures, or context loss occur, record failed rows in the ledger and resume later from `failed` plus `pending` rows. Expired `claimed` rows can be reclaimed by a later `claim` call.
+
+## Aggregated Reporting
+
+- Parallel workers are execution helpers, not independent user-facing deliverables. The main agent owns all user-facing progress reports and final delivery.
+- Each worker must return a concise structured handoff to the main agent with: `worker_id`, claimed local IDs, verified local IDs, failed local IDs with reasons, generated image paths, and whether any claims remain open.
+- The main agent must aggregate worker handoffs with a fresh `status --limit 0 --run-mode full` check. For final delivery, the main agent must also run strict `build` and `verify`.
+- Interim user updates should summarize the whole run: `batch_id`, batch folder, total valid rows, verified count, pending count, claimed count by worker, failed count, current worker activity, interim workbook path if one exists, and next action.
+- Final user output must be one consolidated summary containing: final Excel path, `generated_images` folder, total valid rows, verified rows, failed rows, skipped rows if any, `verify ok=true`, and any limitation encountered with true parallel image generation.
+- If unfinished rows remain, label the workbook or status as interim. Do not present worker completion as whole-task completion.
+- If one worker finishes early while another is still generating, the main agent should claim another batch for the free worker when unfinished rows remain.
 
 ## Batch Defaults
 
