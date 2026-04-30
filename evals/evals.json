@@ -4,7 +4,7 @@
     {
       "id": "full-200-row-production",
       "prompt": "我上传了一个 Mango ERP 待发布 Excel，里面大概 200 条 AliExpress 汽配产品。请用 产品图片1 作为参考，为每条产品生成 AI 优化主图，并返回带 主图 列的新 Excel。",
-      "expected_output": "Agent starts a fresh full task with prepare --limit 0 --run-mode full --new-task, uses the default 2 workers with claim --count 10 --lease-minutes 15, marks each row immediately, and does not call the final task complete until strict build and verify pass."
+      "expected_output": "Agent starts a fresh full task with prepare --limit 0 --run-mode full --new-task, dispatches 2 worker agents before waiting for either one, has each worker claim its own rows with claim --count 10 --lease-minutes 15, marks each row immediately, and does not call the final task complete until strict build and verify pass."
     },
     {
       "id": "sample-ledger-already-exists",

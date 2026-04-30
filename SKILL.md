@@ -88,16 +88,17 @@ Never use row numbers as generated-image names. Never overwrite an existing `<�
 2. Do not pause for style confirmation by default. For a newly uploaded Excel, prepare the durable full queue immediately with `prepare --limit 0 --run-mode full --new-task`. The manifest and ledger record `run_mode`, `requested_limit`, input fingerprint, valid row count, and `batch_id` so a new task cannot be mistaken for an older run.
 3. Use the returned `batch_id` and latest-batch pointer for the rest of the current run. If the user explicitly asks to resume an older batch, pass that older `--batch-id`.
 4. Use `status --limit 0 --run-mode full` before generating images.
-5. Use 2 workers by default for long full runs. Each worker reserves work with `claim --limit 0 --run-mode full --count 10 --owner <worker-id> --lease-minutes 15`.
-6. For each claimed item, open the downloaded original image with `view_image` so it is visible as the edit/reference image.
-7. Use the fixed prompt template in `references/prompt_template.md`; replace `{title}` with the row's `产品标题`.
-8. Generate one image per product using the image generation tool.
-9. Save intermediate outputs to `<batch_folder>/staging/` or `<batch_folder>/review_queue/`.
-10. Only after the generated image is accepted as an AI-refined final, move or copy it into `<batch_folder>/generated_images/<本地ID>.png`.
-11. Immediately run `mark --limit 0 --run-mode full --local-id <本地ID> --status verified --owner <worker-id>` after each completed row.
-12. If generation fails, save the error with `mark --limit 0 --run-mode full --local-id <本地ID> --status failed --error "<reason>"` and continue to the next item when possible.
-13. Use `build --allow-partial` only for interim review workbooks. The final `build` command must be strict and must fail if any row is unfinished or missing a verified image.
-14. Run `verify --limit 0 --run-mode full` before final delivery.
+5. Use 2 concurrent worker agents by default for long full runs. Dispatch both workers before waiting for either one to finish, so worker 1 and worker 2 can each run image generation at the same time when the platform allows it.
+6. Each worker reserves its own work with `claim --limit 0 --run-mode full --count 10 --owner <worker-id> --lease-minutes 15`. Do not simulate two workers by having the main agent process worker 1 and then worker 2 serially.
+7. For each claimed item, open the downloaded original image with `view_image` so it is visible as the edit/reference image.
+8. Use the fixed prompt template in `references/prompt_template.md`; replace `{title}` with the row's `产品标题`.
+9. Generate one image per product using the image generation tool.
+10. Save intermediate outputs to `<batch_folder>/staging/` or `<batch_folder>/review_queue/`.
+11. Only after the generated image is accepted as an AI-refined final, move or copy it into `<batch_folder>/generated_images/<本地ID>.png`.
+12. Immediately run `mark --limit 0 --run-mode full --local-id <本地ID> --status verified --owner <worker-id>` after each completed row.
+13. If generation fails, save the error with `mark --limit 0 --run-mode full --local-id <本地ID> --status failed --error "<reason>"` and continue to the next item when possible.
+14. Use `build --allow-partial` only for interim review workbooks. The final `build` command must be strict and must fail if any row is unfinished or missing a verified image.
+15. Run `verify --limit 0 --run-mode full` before final delivery.
 
 ## Hard Completion Rule
 
@@ -126,12 +127,13 @@ Never use row numbers as generated-image names. Never overwrite an existing `<�
 - Rebuild an interim workbook after each completed batch when useful, but do not call the task complete until the final full workbook has been rebuilt and verified.
 - Keep a heartbeat automation active during the run with a 15-minute interval. Pause or delete it after `unfinished` is 0.
 - If the user explicitly asks for maximum throughput, explain that true parallel AI generation requires an external image-generation API or queue. Do not pretend that local multi-agent orchestration alone guarantees faster built-in image generation.
-- If the user asks for a long full run and does not specify worker count, use 2 workers by default. Use 3 workers only if the user explicitly asks for maximum throughput. Every worker must call `claim --owner <worker-id>` before generating images. Workers must not scan the whole ledger and choose rows themselves.
+- If the user asks for a long full run and does not specify worker count, use 2 concurrent worker agents by default. Start both workers before waiting, so two images can be in generation at once when the image tool/platform supports parallel tool calls. Use 3 workers only if the user explicitly asks for maximum throughput. Every worker must call `claim --owner <worker-id>` before generating images. Workers must not scan the whole ledger and choose rows themselves.
+- If subagents cannot access the image generation tool or the platform serializes image generation calls, report that limitation clearly and continue with the ledger-based queue rather than pretending the run is truly parallel.
 - If rate limits, image-tool failures, or context loss occur, record failed rows in the ledger and resume later from `failed` plus `pending` rows. Expired `claimed` rows can be reclaimed by a later `claim` call.
 
 ## Batch Defaults
 
-- Default production mode for a newly uploaded Excel: full queue, no style-confirmation pause, `--new-task`, 2 workers, 10 rows per worker, 15-minute heartbeat.
+- Default production mode for a newly uploaded Excel: full queue, no style-confirmation pause, `--new-task`, 2 concurrent worker agents, 10 claimed rows per worker, 15-minute heartbeat.
 - Sample mode is optional only when the user explicitly asks to preview style first.
 - Use a higher `--limit` only when the user asks for a bounded batch instead of full processing.
 - For full processing, continue until all valid rows are verified; a partial batch does not count as completion.
